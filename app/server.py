@@ -346,6 +346,12 @@ def create_app() -> FastAPI:
         # 校验 token（配置了才校验）
         token = (raw.get("header") or {}).get("token") or raw.get("token") or ""
         if cfg.verification_token and token and token != cfg.verification_token:
+            log.warning(
+                "Verification Token 校验失败：请求携带 token=%s… 长度%d，与 .env 配置不一致。\n"
+                "请打开 开发者后台 -> 事件与回调 -> 加密策略，把页面显示的 Verification Token "
+                "原样复制覆盖到 .env 的 FEISHU_VERIFICATION_TOKEN 后重启 run.py。",
+                token[:6], len(token),
+            )
             return JSONResponse({"code": -1, "msg": "invalid token"}, status_code=403)
 
         # URL 验证握手
