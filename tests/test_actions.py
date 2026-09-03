@@ -42,6 +42,15 @@ def test_unfreeze_active_user_noop(fake_client, monkeypatch):
     assert "未被停用" in r.text
 
 
+def test_freeze_unjoined_user_gives_guidance(fake_client):
+    fake_client.add(zh_user("ou_u", mobile="14248374742", unjoin=True))
+    r = actions.run_action("freeze", {"ident": "14248374742", "identity": "mobile"}, make_cfg(), fake_client)
+    assert r.ok is False
+    assert "待加入" in r.text
+    assert "删除" in r.text
+    assert fake_client.patch_calls == []  # 未发起任何 PATCH
+
+
 def test_delete_ok(fake_client):
     cfg = make_cfg()
     fake_client.add(zh_user("ou_t", mobile="13800138000"))

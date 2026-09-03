@@ -76,6 +76,14 @@ def _do_identity_action(kind: str, params: dict[str, Any], cfg: Config, client: 
             if person.is_frozen:
                 return ActionResult(ok=False, text=f"{person.name} 当前已是停用状态，无需重复操作。", person=person,
                                     kind=kind, detail=f"{person.name}")
+            if person.is_unjoin:
+                return ActionResult(
+                    ok=False,
+                    text=f"{person.name} 尚未接受加入邀请（待加入状态），无法停用。\n"
+                         "请等待对方接受邀请后再发送：停用 <手机号/邮箱>；\n"
+                         "如需取消该未入职成员，请改用：删除 <手机号/邮箱>（默认走审批）。",
+                    person=person, kind=kind, detail=f"{person.name}（待加入）",
+                )
             person = lifecycle.freeze(client, open_id)
             text = (f"✅ 已停用账号：{person.name}\n"
                     f"该成员现已无法登录飞书（账号保留，可随时恢复）。\n"
