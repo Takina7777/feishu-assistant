@@ -65,8 +65,8 @@ class Config:
     # 令牌可访问性开关
     api_base: str = "https://open.feishu.cn/open-apis"
 
-    @property
     def is_approval(self, action: str) -> bool:
+        """某类操作是否走审批（action: provision/freeze/unfreeze/delete）。"""
         mode = {
             "provision": self.provision_mode,
             "freeze": self.freeze_mode,
