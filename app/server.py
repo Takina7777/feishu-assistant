@@ -294,6 +294,22 @@ def get_bot() -> Bot:
 def create_app() -> FastAPI:
     app = FastAPI(title="飞书成员账号开通/回收机器人", version="1.0.0")
 
+    @app.get("/")
+    def root() -> dict[str, Any]:
+        return {
+            "name": "飞书成员账号开通/回收机器人",
+            "status": "running",
+            "endpoints": {
+                "healthz": "/healthz",
+                "webhook": "/webhook（飞书事件订阅与卡片回调的 POST 入口）",
+            },
+            "tip": "开发者后台请求地址请配置为 https://<你的公网域名>/webhook",
+        }
+
+    @app.get("/webhook")
+    def webhook_get() -> dict[str, Any]:
+        return {"code": 0, "msg": "OK：本地址接收飞书 POST 回调；GET 仅用于连通性检查"}
+
     @app.get("/healthz")
     def healthz() -> dict[str, Any]:
         cfg = load_config()
@@ -312,12 +328,20 @@ def create_app() -> FastAPI:
         # 解密（Encrypt Key）
         if raw.get("encrypt"):
             if not cfg.encrypt_key:
-                return JSONResponse({"code": -1, "msg": "encrypt not configured"}, status_code=400)
+                log.warning(
+                    "收到飞书【加密】回调，但 .env 未配置 FEISHU_ENCRYPT_KEY。\n"
+                    "请到 开发者后台 -> 事件与回调 -> 加密策略 复制 Encrypt Key，"
+                    "填入 .env 的 FEISHU_ENCRYPT_KEY 后重启 run.py。"
+                )
+                return JSONResponse(
+                    {"code": -1, "msg": "encrypt not configured: 请在 .env 配置 FEISHU_ENCRYPT_KEY（见服务端日志）"},
+                    status_code=400,
+                )
             try:
                 raw = json.loads(decrypt_event(cfg.encrypt_key, raw["encrypt"]))
             except Exception as e:  # noqa: BLE001
-                log.warning("事件解密失败: %s", e)
-                return JSONResponse({"code": -1, "msg": "decrypt failed"})
+                log.warning("事件解密失败，请核对 FEISHU_ENCRYPT_KEY 是否与后台 Encrypt Key 完全一致: %s", e)
+                return JSONResponse({"code": -1, "msg": "decrypt failed"}, status_code=400)
 
         # 校验 token（配置了才校验）
         token = (raw.get("header") or {}).get("token") or raw.get("token") or ""

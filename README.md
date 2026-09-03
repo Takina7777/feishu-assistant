@@ -41,6 +41,7 @@ app/
   approval.py      审批状态机（卡片审批单）
   storage.py       审批单 & 审计日志的本地持久化
   messages.py      文本与交互卡片构造
+  cli.py           运维小工具（check / departments / whoami，见 3.4）
   server.py        FastAPI 服务：/webhook 事件+卡片回调、/healthz
 run.py             启动入口
 tests/             单元测试（65 个，pytest，不需要真实凭证/网络）
@@ -112,6 +113,47 @@ python run.py
 `我的ID` → 把 open_id 写入 `.env` → 重启 → 发 `帮助` 试跑。
 
 > 服务地址即回调地址为 `/webhook`，健康检查为 `/healthz`（未配置完整时返回 `misconfigured` 及缺项清单）。
+
+### 3.4 四类配置项分别去哪里拿（自己动手版）
+
+**① App ID / App Secret**
+登录 [open.feishu.cn/app](https://open.feishu.cn/app) → 打开你的应用 →
+左侧 **开发配置 → 凭证与基础信息**（部分版本直接显示在应用首页）。
+- `App ID`（形如 `cli_xxxx`）：直接复制。
+- `App Secret`：默认打码，点旁边的 **重置/显示** 会生成新值，**立刻复制一次**（只显示这一次）。
+- 填到 `.env` 后可用 `python -m app.cli check` 验证凭证是否有效。
+
+**② Verification Token / Encrypt Key**
+开发者后台 → 你的应用 → **开发配置 → 事件与回调**（旧版叫“事件订阅”）。
+- 订阅方式选“将事件发送至开发者服务器（HTTP）”后，页面会显示 **Encrypt Key（加密密钥）** 与
+  **Verification Token（验证令牌）**，可点“复制/重置”。
+- 填法：**不建议开加密** → 两个都留空即可（本服务只在 `.env` 有值时校验）；
+  若你已在后台开启“加密”，必须把 Encrypt Key 原样填进 `FEISHU_ENCRYPT_KEY`，二者不一致将收不到事件。
+- 同一页面：添加事件 `接收消息 im.message.receive_v1`，并把请求地址填为 `https://<你的域名>/webhook`。
+
+**③ 默认部门 open_department_id（od-xxx）**
+`od-xxx` 是 API 专用 ID，管理后台界面一般不直接展示，用下面的命令最稳：
+```bash
+# 需先填好 ①②，并已开通『读取通讯录/获取部门基础信息』等只读权限 + 配置通讯录权限范围
+python -m app.cli departments
+# 输出示例：
+#   od-4e6ac4d14bcd5071a37a39de902c714111111   研发部
+#   od-xxxxyyyyzzzz000011112222333344445555   人力资源部
+```
+把目标部门的 `od-…` 填进 `DEFAULT_DEPARTMENT_OPEN_ID`；不想设默认也完全可以，
+每次开通时用 `部门=od-xxx` 显式指定。
+
+**④ 是否为多许可证（席位）模式**
+- 绝大多数企业不需要管这项。判断方法：先按上面配好并启动，实际发一次
+  `开通 测试 13800000000`，若返回错误码 **44046 / 44047 / 44050**（“必须分配席位”），
+  说明贵司为多许可证模式——此时需为应用开通 **分配用户席位** 权限并把可用席位 ID 配进代码
+  （告诉我错误信息，我按你租户输出加配置项即可）。
+- 也可以在管理后台 **企业设置/费用中心** 看套餐里是否出现“席位”字样。
+
+**补充：把“本人 open_id”填进 OPERATOR_OPEN_IDS**
+两种方式任选：
+- 机器人上线后给它发 `我的ID`，复制返回的 `ou_xxx`；
+- 或 CLI：`python -m app.cli whoami 13800138000`（按你本人手机号/邮箱）。
 
 ---
 
