@@ -66,6 +66,34 @@ class TestProvision:
         with pytest.raises(LifecycleError, match="离职"):
             lifecycle.provision(fake_client, {"name": "李四", "mobile": "13800138000"}, cfg)
 
+    def test_conflict_resigned_advises_restore(self, fake_client):
+        fake_client.add(zh_user("ou_gone", mobile="13800138000", resigned=True, name="泷奈"))
+        cfg = make_cfg()
+        with pytest.raises(LifecycleError) as ei:
+            lifecycle.provision(fake_client, {"name": "Takina", "mobile": "13800138000"}, cfg)
+        text = str(ei.value)
+        assert "恢复" in text
+        assert "占用" in text
+
+    def test_conflict_unjoin(self, fake_client):
+        fake_client.add(zh_user("ou_pending", mobile="13800138000", unjoin=True))
+        cfg = make_cfg()
+        with pytest.raises(LifecycleError, match="待加入"):
+            lifecycle.provision(fake_client, {"name": "李四", "mobile": "13800138000"}, cfg)
+
+    def test_conflict_status_unknown_not_claimed_active(self, fake_client):
+        # 未开通“获取用户受雇信息”字段权限时，get_user 不返回 status，不得误报“在职”
+        user = {"open_id": "ou_no_status", "user_id": "u_no_status",
+                "name": "泷奈", "mobile": "13800138000"}
+        fake_client.add(user)
+        cfg = make_cfg()
+        with pytest.raises(LifecycleError) as ei:
+            lifecycle.provision(fake_client, {"name": "Takina", "mobile": "13800138000"}, cfg)
+        text = str(ei.value)
+        assert "无法读取其账号状态" in text
+        assert "在职成员" not in text
+        assert fake_client.created == []
+
     def test_conflict_frozen(self, fake_client):
         fake_client.add(zh_user("ou_frozen", mobile="13800138000", frozen=True))
         cfg = make_cfg()

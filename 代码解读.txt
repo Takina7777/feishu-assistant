@@ -1,0 +1,895 @@
+================================================================================
+飞书成员账号开通/回收机器人（feishu-assistant）—— 代码解读
+================================================================================
+本文件对整个项目的每一部分代码进行逐模块、逐函数的解释说明，
+帮助你理解：每个文件负责什么、每个关键函数做了什么、为什么这样设计。
+
+目录：
+  一、项目是什么 / 技术栈
+  二、整体架构与代码分层
+  三、目录结构总览
+  四、逐模块代码解读
+      1. run.py .................... 启动入口
+      2. app/__init__.py ........... 包标记
+      3. app/config.py ............. 配置中心（.env 加载）
+      4. app/feishu_client.py ...... 飞书开放平台 API 客户端
+      5. app/crypto_utils.py ....... 事件订阅加密（AES-256-CBC）加解密
+      6. app/parser.py ............. 中文指令解析器
+      7. app/lifecycle.py .......... 账号生命周期业务（核心业务层）
+      8. app/actions.py ............ 统一动作执行器
+      9. app/approval.py ........... 审批状态机
+     10. app/storage.py ............ 本地持久化（审批单 + 审计日志）
+     11. app/messages.py ........... 文本 / 交互卡片构造
+     12. app/server.py ............. FastAPI HTTP 服务与总编排
+     13. app/cli.py ................ 运维命令行小工具
+     14. tests/ .................... 单元测试
+     15. 数据文件与配置文件（.env / data/ / requirements.txt）
+  五、贯穿全项目的核心设计机制（重点）
+  六、一条消息的完整旅程（时序）
+  七、模块依赖关系图
+
+================================================================================
+一、项目是什么 / 技术栈
+================================================================================
+这是一个部署即用的"飞书自建应用机器人"服务：HR / IT 管理员在飞书聊天里给
+机器人发送一句中文指令（如"开通 张三 13800138000"、"停用 13800138000"），
+机器人就通过飞书开放平台的"通讯录 API"完成成员飞书账号的
+开通（入职）、停用（回收，可恢复）、彻底删除（离职）与状态查询，
+并提供卡片审批流与审计日志。
+
+技术栈：
+  - Python 3.10+（开发环境已验证 3.13）
+  - FastAPI + uvicorn   ：HTTP 服务框架（接收飞书事件回调）
+  - requests            ：调用飞书开放平台 API
+  - cryptography        ：事件加密回调的 AES 解密
+  - python-dotenv       ：读取 .env 配置
+  - pytest              ：单元测试（离线，不需要真实飞书凭证）
+
+================================================================================
+二、整体架构与代码分层
+================================================================================
+项目按"分层 + 单向依赖"组织，从外到内依次是：
+
+  入口层    run.py            启动 uvicorn
+  接口层    app/server.py     FastAPI：/webhook 收飞书回调，编排一切
+  解析层    app/parser.py     把中文指令解析成结构化命令（ParsedCommand）
+  执行层    app/actions.py    把"命令 + 参数"转成真实动作并产出人话结果
+  业务层    app/lifecycle.py  账号生命周期规则：解析身份/开通/停用/删除/查询
+  API 层    app/feishu_client.py  封装飞书 HTTP API（令牌/通讯录/消息）
+  ─────────────────────────────────────────────────────────
+  支撑层    config(配置) / storage(持久化) / approval(审批状态机)
+            messages(卡片文案) / crypto_utils(加解密) / cli(运维工具)
+  ─────────────────────────────────────────────────────────
+  外部      飞书开放平台 open.feishu.cn / 本地 data/ 目录
+
+设计上刻意保持低耦合：
+  - lifecycle.py 无状态：不持有 client，client 由调用方传入，方便单测替换；
+  - approval.py 只负责"审批单状态机"，真正的执行逻辑通过 run 回调注入；
+  - storage.py 只做落盘，不关心业务；
+  - server.py 是唯一"认识所有模块"的编排者。
+
+================================================================================
+三、目录结构总览
+================================================================================
+项目根目录
+├── run.py                 启动入口（python run.py）
+├── requirements.txt       依赖清单
+├── .env.example           配置模板（复制为 .env 填写真实值）
+├── .env                   实际配置（已被 .gitignore 排除，含密钥）
+├── README.md              完整使用文档
+├── 开发日志.txt            开发过程记录
+├── 代码解读.txt            本文件
+├── app/
+│   ├── __init__.py        包标记（仅一行 docstring）
+│   ├── config.py          配置加载：从 .env/环境变量读取并校验
+│   ├── feishu_client.py   飞书 API 客户端
+│   ├── crypto_utils.py    事件订阅 AES-256-CBC 加解密
+│   ├── parser.py          中文指令 -> 结构化命令
+│   ├── lifecycle.py       账号生命周期业务
+│   ├── actions.py         统一动作执行器 + 摘要生成
+│   ├── approval.py        审批状态机
+│   ├── storage.py         审批单 + 审计日志本地存储
+│   ├── messages.py        文本消息与交互卡片 JSON 构造
+│   ├── cli.py             运维工具（check/departments/whoami）
+│   └── server.py          FastAPI 服务与总编排（核心）
+├── tests/                 单元测试（无需真实凭证/网络）
+│   ├── conftest.py        共享夹具：make_cfg / zh_user / FakeClient
+│   ├── test_config.py     配置测试
+│   ├── test_parser.py     指令解析测试
+│   ├── test_lifecycle.py  生命周期业务测试
+│   ├── test_actions.py    动作执行测试
+│   ├── test_approval.py   审批流测试
+│   ├── test_storage.py    存储测试
+│   └── test_crypto.py     加解密测试
+└── data/                  运行时数据（.gitignore 已排除）
+    ├── approvals.json     审批单列表（持久化）
+    └── audit.jsonl        审计日志（追加写入，一行一条 JSON）
+
+================================================================================
+四、逐模块代码解读
+================================================================================
+
+--------------------------------------------------------------------------------
+1. run.py —— 启动入口
+--------------------------------------------------------------------------------
+文件很短（42 行），职责是"校验配置 + 启动 uvicorn 服务器"。
+
+  from __future__ import annotations
+      Python 3.10 特性：延迟求值类型注解，让注解写得更简洁且不引入运行时开销。
+
+  logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+      配置根日志：时间 + 级别 + 日志器名 + 消息，级别 INFO。
+
+  def main():
+      cfg = load_config()           # 读取 .env 生成 Config（单例，见 config.py）
+      problems = cfg.validate()     # 返回配置缺失项清单
+      if problems:
+          打印一排 ⚠️ 提示，把缺项逐条列出；
+          if not cfg.app_id or not cfg.app_secret: sys.exit(1)
+          # 注意：只有"最关键的 App 凭证"缺失才阻止启动（退出码 1）。
+          # 其余缺项（如 OPERATOR_OPEN_IDS 为空）只提示不退出，
+          # 因为默认安全策略是"白名单为空 = 全部拒绝"。
+      print(启动信息...)            # 提示回调地址填 https://<域名>/webhook
+      uvicorn.run("app.server:app", host=cfg.host, port=cfg.port, log_level="info")
+          # 以"字符串导入"方式运行 FastAPI 应用对象 app（模块级变量，见 server.py）。
+          # 传字符串而不是对象，是为了让 uvicorn 拿到 reload 能力（热重载用）。
+
+  if __name__ == "__main__": main()
+      # 仅当直接执行 python run.py 时才运行；被 import 时不触发。
+
+--------------------------------------------------------------------------------
+2. app/__init__.py —— 包标记
+--------------------------------------------------------------------------------
+只有一行 docstring："飞书成员账号生命周期机器人 项目包。"
+作用是让 app 成为一个 Python 包，没有其他逻辑。
+
+--------------------------------------------------------------------------------
+3. app/config.py —— 配置中心
+--------------------------------------------------------------------------------
+所有配置集中在这里从 .env / 环境变量读取，提供"类型安全、只读"的访问。
+设计要点：Config 是 frozen=True 的 dataclass，初始化后不可修改，
+避免运行中被意外改动；所有敏感信息（App Secret 等）只在内存中存在。
+
+  import os / dataclass / pathlib
+  try: from dotenv import load_dotenv
+  except ImportError: load_dotenv = None
+      # 优雅降级：没装 python-dotenv 也能运行（直接读真实环境变量）。
+
+  _load()
+      # 从"当前目录"或"项目根目录"找 .env 并加载。
+      # Path(__file__).resolve().parent.parent 定位到项目根（app 的上一级）。
+      # override=False：不覆盖已存在的环境变量（真实环境变量优先级更高）。
+
+  _env(key, default="")
+      # 读字符串环境变量并 strip 空白。
+
+  _bool_env(key, default)
+      # 读布尔值：空则用默认；否则 "1/true/yes/on" 视为 True。
+
+  _split_env(key)
+      # 读逗号分隔列表（白名单 open_id 用），同时兼容中文全角逗号"，"。
+
+  @dataclass(frozen=True)
+  class Config: 字段分组
+      # 飞书应用：app_id / app_secret / verification_token / encrypt_key
+      # 服务：host / port / data_dir（数据目录，默认 "data"）
+      # 通讯录默认值：default_department_open_id（开通默认部门）、
+      #   default_employee_type（默认员工类型 1=正式）、
+      #   delete_acceptor_open_id（删除时资源转交人）
+      # 权限白名单：operator_open_ids（操作员）、approver_open_ids（审批人）
+      # 执行模式：provision_mode/freeze_mode/unfreeze_mode/delete_mode
+      #   （"direct"=直接执行，"approval"=先审批；删除默认 approval）
+      # approval_ttl_minutes：审批单有效期，默认 1440 分钟（1 天）
+      # api_base：飞书开放平台地址，便于将来换域名/代理。
+
+  Config.is_approval(action)
+      # 查 mode 映射表判断某类操作（provision/freeze/unfreeze/delete）
+      # 是否走审批；未知 action 一律视为 direct。
+
+  Config.validate()
+      # 返回配置问题列表（空列表 = 可启动）。
+      # 只检查三项：app_id、app_secret、operator_open_ids。
+      # 前两项缺失没法干活；第三项空属于"配置引导"提示——
+      # 需要先让本人给机器人发"我的ID"，把返回 open_id 填进来。
+
+  模块级 _config + load_config() / reset_config()
+      # 进程内单例：第一次调用时真正加载，之后直接返回缓存对象；
+      # reset_config() 仅测试用（清空单例，让测试能重新加载）。
+      # 单例意义：server 的多个请求 / 线程共享同一份配置对象。
+
+--------------------------------------------------------------------------------
+4. app/feishu_client.py —— 飞书开放平台 API 客户端
+--------------------------------------------------------------------------------
+封装所有对飞书开放平台的 HTTP 调用。只用 requests 库。
+内部约定：所有通讯录接口 user_id_type=open_id，即代码内部一律用 open_id
+标识用户。
+
+  4.1 CONTACT_ERR_HINTS —— 错误码转中文提示
+      # 大字典：飞书通讯录错误码 -> 给用户看的中文可执行提示。
+      # 例如 41001"手机号已存在"、44037"租户管理员不允许被删除"、
+      # 99991672"应用无权限"、44046"多许可证需分配席位"等。
+      # 作用：把冷冰冰的 code 变成"为什么失败 + 该怎么办"。
+
+  4.2 class FeishuError(Exception)
+      # 业务异常：携带 code/msg/http/request_id 四要素。
+      # friendly()：拼出带提示的完整中文文案（含错误码表里的 hint 和 Request ID），
+      # 方便直接展示给用户或转给管理员排查。
+
+  4.3 class FeishuClient
+      __init__: 保存 app_id/app_secret/api_base/timeout；
+                复用 requests.Session()（连接复用，性能好）；
+                _token/_token_expire_at/_lock 组成令牌缓存。
+
+      tenant_access_token(force=False)
+          # 获取应用身份令牌（tenant_access_token）。
+          # 缓存策略：锁内判断——令牌未过期（默认 7200s，提前 300s 视为过期）
+          # 就直接返回缓存；否则调 /auth/v3/tenant_access_token/internal
+          # 换取新令牌。互斥锁保证并发下只换一次，避免令牌风暴。
+
+      _request(method, path, query, body)
+          # 所有请求的统一出口：拼 URL、带 Bearer 令牌、
+          # JSON body、超时、解析响应。
+          # 业务约定：飞书 code==0 才成功；
+          #   错误码 99991663（令牌失效）时强制刷新令牌并自动重试一次；
+          #   其余错误抛 FeishuError（含 X-Request-Id 便于排查）。
+
+      通讯录接口（都是 thin wrapper，只负责传参与取 data 段）：
+      batch_get_user_ids(mobiles, emails, include_resigned=True)
+          # POST /contact/v3/users/batch_get_id
+          # 用手机号/邮箱批量换 open_id；include_resigned=True 表示含离职成员，
+          # 这对"开通前查重"很重要。返回 user_list。
+      get_user(open_id)
+          # GET /contact/v3/users/{open_id}，取单个成员完整信息。
+      create_user(...)
+          # POST /contact/v3/users，创建成员（= 入职开通）。
+          # 关键参数 client_token：幂等令牌——同一个 token 重复提交飞书只建一次，
+          # 防止"网络重试造成重复建号"。
+      patch_user(open_id, fields)
+          # PATCH /contact/v3/users/{open_id}，部分更新。
+          # 冻结/解冻就是 fields={"is_frozen": True/False}。
+          # 注释提醒：department_ids / is_frozen 类更新限 1 QPS（见 lifecycle 限速）。
+      delete_user(open_id, acceptor_open_id)
+          # DELETE /contact/v3/users/{open_id}，删除成员（离职）。
+          # 可选 acceptor_open_id：同时指定部门群/外部群/文档/日历/应用/妙记
+          # 六类资源的转交人；为空则飞书默认转给直属上级。
+
+      消息接口：
+      send_message(receive_id, msg_type, content, receive_id_type)
+          # POST /im/v1/messages；receive_id_type 支持 open_id（单聊）与
+          # chat_id（群聊）。注意 content 必须是 JSON 字符串（飞书要求）。
+      send_text / send_card
+          # 便捷方法：发纯文本 / 发交互卡片（msg_type="interactive"）。
+
+  4.4 模块级工具
+      new_client()
+          # 从配置懒加载构建一个 client（import 时避免循环依赖，故函数内导入）。
+      gen_client_token()
+          # uuid4().hex 生成幂等令牌字符串。
+
+--------------------------------------------------------------------------------
+5. app/crypto_utils.py —— 事件订阅加密的加解密
+--------------------------------------------------------------------------------
+如果飞书开发者后台开启了"加密策略"，飞书会把事件包体加密成
+{"encrypt": "<密文>"} 再 POST 过来，本文件负责解密。
+
+加解密规范（飞书官方）：
+  key = sha256(encrypt_key 的 utf-8) 的十六进制串，取前 32 字符当 32 字节密钥
+  iv  = 密钥的前 16 字节
+  算法 = AES-256-CBC；填充 = PKCS7；传输格式 = base64 密文
+
+  _cipher_params(encrypt_key)
+      # 按上面规范从 Encrypt Key 推导出 (key, iv) 字节串。
+
+  decrypt_event(encrypt_key, cipher_text)
+      # base64 解码 -> AES-CBC 解密 -> 去掉 PKCS7 填充 -> utf-8 明文。
+      # 填充校验：尾字节 pad_len 必须在 1..16，且末尾 pad_len 个字节必须全是
+      # pad_len，否则抛"填充校验失败"（通常是 Encrypt Key 填错了）。
+      # 解密后的明文就是标准事件 JSON（含 header/event 等）。
+
+  encrypt_event(encrypt_key, plain_text)
+      # 反方向加密（含 PKCS7 填充），主要用于自测 / 回显调试。
+
+--------------------------------------------------------------------------------
+6. app/parser.py —— 中文指令解析器
+--------------------------------------------------------------------------------
+把用户发的自然中文指令解析成结构化命令（ParsedCommand），是整个系统"好用"的
+关键：支持别名、客气话剥离、群聊 @ 尾巴清理、中文标点、手机号清洗等。
+
+  6.1 常量字典
+      ACTION_ALIASES: 动作别名表。例如
+          provision <- 开通/创建/新增/添加/onboard/开账号/开通账号
+          freeze    <- 停用/冻结/回收/suspend/停用账号
+          delete    <- 删除/彻底删除/注销/离职/回收-彻底删除...
+          query     <- 查询/查/查找/status/状态/看看
+          whoami    <- 我的ID/我是谁...
+          logs      <- 日志/audit/log/记录...
+          help      <- 帮助/help/菜单/?/？...
+      KEY_ALIASES: 开通命令字段别名。如 name<-姓名/名字、mobile<-手机/手机号、
+          email<-邮箱、dept<-部门、employee_no<-工号、job_title<-职务、
+          en_name<-英文名、employee_type<-类型。
+      TYPE_ZH: 中文员工类型 -> 数字。正式=1/实习=2/外包=3/劳务=4/顾问=5。
+
+  6.2 正则（身份识别用）
+      _OPEN_ID_RE   ^ou_[A-Za-z0-9]+$       飞书 open_id
+      _UNION_ID_RE  ^on_[A-Za-z0-9]+$       union_id（本工具不支持）
+      _EMAIL_RE     常规邮箱
+      _CN_MOBILE_RE ^1[3-9]\d{9}$          大陆手机号
+      _INTL_MOBILE_RE ^\+\d{7,15}$          带国家码国际号
+
+  6.3 数据结构
+      class CommandError(Exception)：解析/参数错误，message 直接展示给用户。
+      @dataclass ParsedCommand:
+          action  # provision/freeze/unfreeze/delete/query/whoami/logs/help
+          raw     # 原始指令文本
+          target  # 冻结/启用/删除/查询 的目标身份（手机号/邮箱/open_id）
+          params  # provision 的字段字典，或 logs 的 count、操作的 note 备注
+          identity# 规范化后的身份类型
+          kind property  # 直接返回 action（对外统一叫 kind）
+
+  6.4 关键函数
+      classify_identity(text)
+          # 判断一段文字是 mobile/email/open_id/union_id/unknown。
+      normalize_identity(text)
+          # 清洗身份文本：去掉空格、连字符、引号、括号等装饰，
+          # 例如 "+86 138 0013 8000" -> "+8613800138000"。
+          # 特殊处理 + 开头：只删后段的空格/连字符，保留加号。
+      _strip_mention(text)
+          # "人话"预处理：去掉群聊 @机器人 富文本残尾（@_user_123）、
+          # 客套前缀（"麻烦你/帮我/我想要/你好/请"等，循环剥离最多 4 轮）、
+          # 客套后缀（"谢谢/辛苦了"等）。让"请帮我开通张三 谢谢"也能被识别。
+      _merge_mobile_parts(tokens)
+          # 把被空格拆开的国际手机号合并回一个 token：
+          # "+86 138 0013 8000" 四个 token 合成 "+8613800138000"。
+      _split_args(text)
+          # 按 空格/半角逗号/全角逗号/分号 切参数。
+      _first_action(text)
+          # 在文本开头匹配动作别名，返回 (action, 剩余文本)。
+          # 技巧：按别名"长度从长到短"排序匹配，避免"回收-彻底删除"
+          # 被更短的别名"回收"先吃掉。
+      _classify_field(tok)
+          # 把单个参数 token 分类成 (key, value)：
+          #   匹配 "键=值" 或 "键：值" -> 用 KEY_ALIASES 归一化键名；
+          #   键名不认识 -> ("unknown_key", 原样)；
+          #   没有等号 -> ("free", 裸值)。
+      _norm_employee_type(v)
+          # 数字直接转 int；否则查 TYPE_ZH 中文映射。
+      parse_command(raw_text) —— 总入口
+          # 1) _strip_mention 清洗；
+          # 2) _first_action 识别动作；失败抛 CommandError（提示发"帮助"）；
+          # 3) help/whoami 直接返回；logs 取第一个数字参数为条数；
+          # 4) provision 走 _parse_provision；
+          # 5) 其余（freeze/unfreeze/delete/query）：要求第一个 token 是
+          #    目标身份，多余内容作为备注（如删除原因 note）；
+          #    身份必须可识别（否则给出三类合法格式提示），union_id 明确拒绝；
+          #    target/identity 写入 cmd。
+      _parse_provision(cmd, tokens, rest)
+          # 逐个 token 分类：key=value 进 params，裸值自动归类——像邮箱的当
+          # email、像手机号的当 mobile（并归一化）、其余按顺序当姓名候选。
+          # 校验：必须有姓名；必须有手机号或邮箱（飞书要求手机号必填，
+          # 故强提示）；手机号/邮箱格式不合法要报错；部门必须 od- 开头；
+          # 员工类型必须是 1-5 或中文枚举。
+          # 最后把 dept 字段转成 dept_open_id 供业务层使用。
+
+--------------------------------------------------------------------------------
+7. app/lifecycle.py —— 账号生命周期业务（核心业务层）
+--------------------------------------------------------------------------------
+实现账号从入职到离职的完整业务规则。模块无状态：client 由调用方传入。
+错误以自定义异常抛出，message 可直接展示给用户。
+
+  7.0 限速设计（模块顶部）
+      _FREEZE_LOCK / _FREEZE_INTERVAL=1.0 / _last_patch_monotonic
+      # 飞书对 PATCH is_frozen / department_ids 限 1 QPS。
+      # 方案：全局互斥锁串行化所有冻结/解冻 PATCH + _pace_freeze()
+      # 保证两次之间至少睡足 1 秒（用 time.monotonic，不受系统时钟调整影响）。
+
+  7.1 数据结构
+      class LifecycleError(Exception)
+          # 业务规则错误，message 可直接展示给用户（区别于系统内部错误）。
+
+      @dataclass Person —— 从飞书 user 对象提炼的成员摘要
+          字段：open_id/user_id/name/en_name/mobile/email/employee_no/
+                department_ids/job_title + 五个状态布尔 + raw 原始 dict。
+          Person.from_user(user)
+              # 兼容两种返回结构：状态可能在 status.is_frozen 里，
+              # 也可能在顶层 user.is_frozen——_st() 两层都找，谁有值用谁。
+          state_label（property）
+              # 把一堆布尔状态翻译成人话：
+              #   已离职 -> 已退出企业 -> 待加入 -> 已停用 -> 未激活 -> 正常。
+              # 注意判断顺序：is_resigned 最优先，因为离职通常伴随冻结标志。
+          line()
+              # 单行摘要（名称/手机/邮箱/工号/状态），供审计 detail 使用。
+
+      mask_mobile(m)
+          # 手机号脱敏：11 位大陆号 -> 前3+****+后4；
+          # "+国家码"号 -> 前3+****+后3；其余原样返回。
+
+  7.2 身份解析
+      resolve_person(client, ident, ident_kind=None)
+          # 统一入口：把"手机号/邮箱/open_id"解析成 Person。
+          #   手机号/邮箱：调 batch_get_user_ids(include_resigned=True) 换 open_id；
+          #   找不到 -> LifecycleError("未找到使用 xx 的成员…或先执行开通")；
+          #   open_id：直接用。
+          # 然后再 get_user 取详情并 Person.from_user 封装。
+          # 两层 FeishuError 都包成 LifecycleError 并追加友好提示。
+      kind_label(kind)：手机号/邮箱/open_id 的中文名。
+      resolve_from_batch(...)：薄封装，把 include_resigned=True 写死。
+
+  7.3 开通（创建成员）
+      check_conflict(client, mobile, email)
+          # 开通前查重：按手机号/邮箱反查已存在用户（含离职）；
+          # 查不到或 API 报错都返回 []（查重失败不阻塞开通主流程？——不，
+          # 实际 provision 里把 [] 当作无冲突继续创建；风险可控）。
+      provision(client, params, cfg, client_token)
+          # 开通主流程：
+          #  1) 姓名必填校验；
+          #  2) check_conflict 查重，命中后分情形给可执行建议：
+          #      · 查不到详情（通常是离职不可见）-> 提示先处理后端账号；
+          #      · 已离职 -> 提示需在管理后台释放手机号/邮箱；
+          #      · 已停用 -> 提示改用"启用"复用；
+          #      · 在职 -> 提示无需重复开通，可用"查询"查看；
+          #  3) 部门必填：优先 params.dept_open_id，否则默认部门，都没有则报错；
+          #  4) 幂等令牌：外部没传就 gen_client_token()；
+          #  5) client.create_user(...) 真实创建，FeishuError 包成 LifecycleError；
+          #  6) 返回 Person。
+          # 这就是"防重复建号 + 防误伤"的核心逻辑。
+
+  7.4 停用 / 启用 / 彻底删除
+      _patch_frozen(client, open_id, frozen)
+          # 冻结/解冻统一实现：拿全局锁 -> patch_user(is_frozen) -> 限速。
+          # 特判错误码 44036：不允许冻结租户创建者/超级管理员。
+          # 完成后重新 get_user 拉最新状态返回 Person（拿不到就再 resolve 一次）。
+      freeze() / unfreeze()
+          # 一个调用 _patch_frozen(True)，一个 (False)，语义封装。
+      deprovision(client, open_id, cfg)
+          # 彻底删除（离职）：读取 delete_acceptor_open_id（资源转交人），
+          # 为空则 None（由飞书默认转直属上级），调用 delete_user。
+
+  7.5 摘要
+      provision_summary / _describe_provision_params
+          # 生成"审批卡片上给审批人看"的开通内容摘要（姓名/脱敏手机/邮箱/部门）。
+      # 其余操作的审批摘要在 actions.approval_summary 里（因为它需要 resolve_person）。
+
+--------------------------------------------------------------------------------
+8. app/actions.py —— 统一动作执行器
+--------------------------------------------------------------------------------
+把"统一参数（kind + params）"翻译成真实的 lifecycle 调用，并把结果/异常
+统一封装成 ActionResult（人话文本 + 结构化字段），供 server 直接发送。
+
+  @dataclass ActionResult:
+      ok      # 是否成功
+      text    # 给用户看的结果/错误文案
+      person  # 涉及成员（可为空）
+      kind    # 动作类型
+      detail  # 审计用的简短摘要
+
+  _err(e, kind)
+      # 把任意异常转 ActionResult(ok=False)，detail 取第一行。
+      # 注意动作层会捕获"所有异常"（含 FeishuError/LifecycleError/ValueError），
+      # 保证任何失败都变成可读消息而不是 500。
+
+  run_action(kind, params, cfg, client) —— 统一入口
+      # provision -> _do_provision；freeze/unfreeze/delete/query ->
+      # _do_identity_action；其它 -> 报"未知操作类型"。
+
+  _do_provision(params, cfg, client)
+      # 调 lifecycle.provision；成功后拼一条"✅ 开通成功"的多行文案
+      # （姓名/联系方式/部门/open_id/系统已发送加入邀请），并写 ActionResult。
+
+  _do_identity_action(kind, params, cfg, client)
+      # 1) 先 resolve_person 把目标身份换成成员详情；
+      # 2) 按 kind 分支：
+      #    query    -> 输出完整状态（status_text）；
+      #    freeze   -> 已是停用直接拒绝（幂等）；"待加入"状态给出引导
+      #                （必须等对方接受邀请才能停用，否则建议"删除"）；
+      #    unfreeze -> 未被停用则拒绝；已离职则提示走管理后台/重新开通；
+      #    delete   -> 已离职则拒绝（幂等）；否则 deprovision 并说明资源转交去向；
+      # 3) 全程 try/except 兜底，任何异常都转成 ActionResult(ok=False)。
+
+  approval_summary(kind, params, cfg, client)
+      # 审批卡片内容摘要：开通用 provision_summary；其余先解析成员，
+      # 输出"目标：姓名（当前状态）｜工号｜脱敏手机｜备注"。
+      # 解析失败也允许（执行阶段会再解析一次），降级为"目标：<ident>"。
+
+  param_summary(kind, params)
+      # 审计日志用的脱敏摘要：开通只留 姓名+脱敏手机+邮箱，其余只留 ident。
+
+--------------------------------------------------------------------------------
+9. app/approval.py —— 审批状态机
+--------------------------------------------------------------------------------
+只负责"审批单生命周期"，执行器通过 run 回调注入，保持模块可独立测试。
+
+  审批单状态（定义在 storage.py）：pending -> approved/rejected/expired。
+
+  class ApprovalManager(cfg, storage)
+      submit(kind, summary, params, requester_open_id, requester_note)
+          # 提交新审批单。先顺手把超时的 pending 单 mark_expired（惰性清理），
+          # 再 storage.create_entry 落盘。
+      can_decide(entry, operator_open_id)
+          # 权限判断：只有 approver_open_ids 里的人能审批。
+      decide(entry_id, approver_open_id, approve, run)
+          # 审批表态核心，多重防线保证"只能被处理一次"：
+          #   1) 单子不存在 -> 返回错误；
+          #   2) 状态不是 pending -> 提示"已被处理，无需重复操作"；
+          #   3) 不是审批人 -> 拒绝（附 open_id 便于排查）；
+          #   4) 超时（is_expired）-> transition 到 expired 并提示重新提交；
+          #   5) CAS 原子转移：storage.transition(entry_id, PENDING, ...)，
+          #      若转移失败说明已被别人处理（并发/重复点击兜底）；
+          #   6) 拒绝 -> 返回 ok=True, ran=False；
+          #   7) 同意 -> 立即调 run(updated["params"]) 执行；
+          #      执行任何异常都捕获转成可读文案（不抛给上层），
+          #      并把执行结果 reply 写回审批单。
+      kind_zh(kind)
+          # 动作类型中文名（转发给 messages.ACTION_ZH）。
+
+--------------------------------------------------------------------------------
+10. app/storage.py —— 本地持久化（审批单 + 审计日志）
+--------------------------------------------------------------------------------
+用 JSON（审批单全量）和 JSONL（审计日志追加）两种文件存本地状态，
+进程内用一把 threading.Lock 保证线程安全。所有写盘都做"原子写"。
+
+  状态常量：PENDING/APPROVED/REJECTED/EXPIRED/CANCELLED。
+
+  now_iso()
+      # 当前时间 ISO 格式（带时区、秒精度），供审批单/日志打时间戳。
+
+  _atomic_write_json(path, payload)
+      # 原子写：先写临时文件 path.with_suffix(".tmp")，再 os.replace 覆盖目标。
+      # 好处：中途崩溃也不会留下"写了一半"的损坏 JSON。
+
+  class Storage(data_dir)
+      __init__: 建目录；approvals_path=data/approvals.json、
+                audit_path=data/audit.jsonl；文件不存在时初始化空数组。
+
+      审计日志：
+      audit(record)
+          # 追加一行：自动补 ts，json.dumps(ensure_ascii=False)+换行。
+          # 追加写天然适合日志：无并发覆盖问题（靠锁再保险一层）。
+      recent_audit(count=10)
+          # 读文件，只取最后 200 行反向解析（倒序读取直到凑够 count），
+          # 单行 JSON 损坏就跳过——审计日志允许丢一条坏数据，不影响整体。
+
+      审批单：
+      _load() / _save(rows)
+          # 全量读/写 approvals.json；读失败（损坏/不存在）返回 []。
+      new_id()
+          # 生成单号：op-<秒级时间戳>-<uuid 前8位>，全局唯一且肉眼可读。
+      create_entry(...)
+          # 新建 pending 审批单。字段：
+          #   id/kind/summary/params(执行所需全部参数，含幂等 client_token)/
+          #   requester_open_id/requester_note/status/created_at/
+          #   decided_at/decided_by/reply。
+          # 在锁内"读-追加-写"。
+      get_entry(entry_id)
+          # 按 id 查单（锁内读）。
+      update_entry(entry_id, **fields)
+          # 无条件按 id 更新字段（用于写执行结果 reply）。
+      transition(entry_id, expected_status, **fields) -> (ok, entry)
+          # CAS（Compare-And-Swap）：仅当当前状态 == expected_status 才更新并
+          # 返回 (True, 更新后entry)；否则返回 (False, 现状)。
+          # 这是"防重复审批/并发安全"的关键原语。
+      mark_expired(ttl_minutes)
+          # 把所有超时 pending 单批量标记 expired，返回变更数量。
+      is_expired(entry, ttl_minutes)
+          # 判断单子从 created_at 到现在是否超过有效期。
+      recent_entries(count=10)
+          # 最近 N 条审批单（倒序）。
+      prune(keep_days=30)
+          # 清理：超过 keep_days 且非 pending 的终结单删掉，防止文件无限膨胀。
+          # （目前主要被测试覆盖，作为长期运行的维护入口保留。）
+
+--------------------------------------------------------------------------------
+11. app/messages.py —— 文本消息与交互卡片构造
+--------------------------------------------------------------------------------
+纯函数模块：不访问网络、不依赖状态，输入参数输出飞书消息/卡片 JSON。
+
+  ACTION_ZH：动作类型 -> 中文名（供各种文案拼接复用）。
+  HELP_TEXT：一段长帮助文本，包含所有指令示例。
+
+  status_text(person)
+      # 把 Person 拼成"查询"结果的完整文本块。
+      # 手机号同样走 mask_mobile 脱敏。
+      # 注意模块顶部不 import lifecycle（避免循环依赖），用到 mask_mobile
+      # 时在函数内部延迟 import。
+
+  simple_card(title, body, template)
+      # 通用文本卡片：config.wide_screen_mode 全屏 + header 蓝/绿等色带 +
+      # markdown 正文。返回的就是飞书 msg_type=interactive 的 content。
+
+  approval_card(entry, approver_names_hint)
+      # 审批卡片：header 橙色"【审批】<动作中文名>"；
+      # 正文 markdown：操作类型/审批单号/申请人(@at 标签)/申请内容/备注；
+      # 分隔线 hr；两个按钮：
+      #   "✅ 同意并执行" type=primary，value={"op":"approve","entry_id":...}
+      #   "❌ 拒绝"       type=danger， value={"op":"reject","entry_id":...}
+      # 按钮的 value 会在用户点击后原样回传，server 据此知道"审哪个单、同不同意"。
+      # 可选 note 提示条（approver_names_hint 用）。
+
+  audit_lines(records)
+      # 把审计记录列表渲染成聊天文本：时间 + ✅/❌ + 动作中文名 +
+      # 操作人 + 详情。
+
+--------------------------------------------------------------------------------
+12. app/server.py —— FastAPI 服务与总编排（核心模块）
+--------------------------------------------------------------------------------
+把以上所有模块串起来：接收飞书事件回调 -> 解密/校验 -> 解析指令 ->
+鉴权 -> 直接执行或提交审批 -> 发送结果/卡片回飞书。所有耗时业务都在
+后台线程池执行，HTTP 立即回 200 确认，符合飞书回调"3 秒内应答"的要求。
+
+  12.1 class Bot —— 机器人运行时
+      __init__: 持有 cfg、FeishuClient、Storage、ApprovalManager，
+                以及 max_workers=8 的 ThreadPoolExecutor（thread_name_prefix="bot"，
+                方便日志里辨认机器人工作线程）。
+
+      发送工具组：
+      reply(receive_id, text, receive_id_type) / reply_card(...)
+          # 发文本 / 发卡片，FeishuError 只记 warning 不抛出，
+          # 避免"回消息失败"拖垮回调线程。
+      send_result(...)   # 发一个 ActionResult 的 text。
+
+      审计封装：
+      audit(action, ok, operator, detail, entry_id, extra)
+          # 统一组装审计记录（含可选审批单号、附加字段）写入 storage。
+
+      消息处理主链路：
+      handle_message_event(event)
+          # 1) 只处理文本消息（message_type=="text"），其余直接丢弃；
+          # 2) 解析消息 content JSON 拿 text；
+          # 3) 决定回复给谁：单聊(p2p)回发送者 open_id，群聊回 chat_id；
+          # 4) parse_command 解析失败（CommandError）-> 直接回错误文案；
+          # 5) route_command 派发；最外层再兜底 try/except，内部错误回
+          #    "⚠️ 处理指令时发生内部错误"。
+
+      route_command(cmd, operator, receive_id, rid_type)
+          # 指令路由 + 权限白名单：
+          #   help / whoami —— 任何人均可用（引导式初始化需要）；
+          #   其余全部要求 operator 在 operator_open_ids 白名单里，
+          #     不在 -> 回"⛔ 您不是授权操作员"+ 引导文案；
+          #   logs —— 读审计并格式化（count 夹在 1..50）；
+          #   账号操作 -> handle_account_action。
+
+      handle_account_action(cmd, operator, receive_id, rid_type)
+          #   direct 模式（query 永远 direct，其余看 cfg.is_approval）：
+          #     直接 _execute 并回结果；
+          #   approval 模式：
+          #     1) actions.approval_summary 生成审批摘要；
+          #     2) approvals.submit 建单（记审计"提交审批"）；
+          #     3) 回申请人的确认消息（含审批单号）；
+          #     4) 给每个审批人发审批卡片（approval_card）。
+
+      _build_params(kind, cmd)
+          # 统一参数成型：
+          #   provision：cmd.params 拷贝 + 补 client_token 幂等令牌
+          #     （注意：审批模式下令牌在"提交时"就生成，审批通过后执行时
+          #      复用同一个令牌，从提交到执行全链路幂等）；
+          #   其余：{"ident": cmd.target, "identity": cmd.identity,
+          #          "note": 备注}。
+
+      _execute(kind, params, operator)
+          # 真正执行 run_action；任何内部异常兜底成 ActionResult；
+          # 无论成败都写一条审计（含 result.text 第一行作 brief）。
+
+      卡片审批回调：
+      handle_card_action(value, operator)
+          # 收到按钮回调：解析 op(approve/reject) 与 entry_id；
+          # 不认识的 op 直接忽略；
+          # 单子不存在 -> 私聊告知"不存在或已被清理"；
+          # 定义 runner：把 params 交给 run_action 并返回
+          #   {"ok","text","person"}（异常也转成可读失败结果）；
+          # approvals.decide(...) 走完整状态机；
+          # 写审计（"<kind>-同意/拒绝"，含最终 status）；
+          # 私聊通知审批人（点按钮的人）；若申请人另有其人，也通知申请人。
+
+      事件入口（线程池）：
+      dispatch(body) -> self._pool.submit(self._safe_handle, body)
+          # 把回调体丢进线程池，HTTP 层立即返回。
+      _safe_handle(body)
+          # 线程里做的第一件事：识别回调类型。
+          #   1) header.event_type == "im.message.receive_v1"：消息事件；
+          #   2) "card.action.trigger"（新版卡片回调事件）或旧版卡片 payload
+          #      （body 顶层有 action）-> 提取 operator 与按钮 value 走审批；
+          #   3) 其它事件类型 -> log 忽略。
+          # 全程 try/except 兜底，绝不让线程池线程因异常死掉。
+      _is_legacy_card_action(body)
+          # 兼容旧版卡片回调：body 顶层带 action dict 且有 value/tag。
+      _extract_card_operator(body)
+          # 从多个可能的字段位置（event.operator.open_id / 顶层 open_id …）
+          # 尽力提取点按钮人的 open_id。
+
+  12.2 FastAPI 应用
+      模块级单例：_bot + _bot_lock + get_bot()
+          # 懒加载单例 Bot（锁保护），多 worker 也不重复建。
+      create_app() 里定义路由：
+        GET  /          -> 返回服务名/状态/端点清单的小 JSON。
+        GET  /webhook   -> 说明性文本（GET 仅连通性检查）。
+        GET  /healthz   -> 调 cfg.validate()，ok 或 misconfigured+缺项清单。
+        POST /webhook   -> 主入口，处理链：
+           1) request.json() 读包体；
+           2) 若带 "encrypt" 字段：必须有 encrypt_key，否则 400 + 日志引导；
+              有则 decrypt_event 解出明文包体替换 raw（解密失败 400）；
+           3) Verification Token 校验：只在"配置了 token 且请求带 token"时比对，
+              不一致 -> 403 + 详细引导日志；
+           4) URL 验证握手：raw.type=="url_verification" 或带 challenge，
+              原样回 challenge（飞书用它确认地址归属）；
+           5) 其余 -> bot.dispatch(raw) 丢线程池，立即 JSONResponse {"code":0}
+              告诉飞书"收到"（业务异步执行）。
+      app = create_app()   # 模块级实例，uvicorn.run("app.server:app") 引用它。
+
+--------------------------------------------------------------------------------
+13. app/cli.py —— 运维命令行小工具
+--------------------------------------------------------------------------------
+给部署/配置阶段用的：python -m app.cli <命令>。三个子命令都只读，
+都基于同一个 FeishuClient + tenant_access_token。
+
+  cmd_check()
+      # 验证 .env 里 App ID/Secret 能否换到 tenant_access_token，
+      # 并顺带打印 config.validate() 的缺项清单。
+  cmd_departments()
+      # 递归列出权限范围内部门树：name -> open_department_id(od-xxx)，
+      # 输出用于填 DEFAULT_DEPARTMENT_OPEN_ID。
+  cmd_whoami(ident)
+      # 用本人手机号/邮箱换回自己的 open_id（用于填 OPERATOR_OPEN_IDS /
+      # APPROVER_OPEN_IDS）。
+  _walk_departments(client, max_depth=10)
+      # DFS：从根部门 "0" 出发，用 page_token 翻页拉每层子部门，
+      # 去重 seen，按 (name, od) 平铺输出；控制最大深度防死循环。
+  main(argv)
+      # 子命令分发；无参数或未知参数打印 __doc__（自带使用说明）。
+  if __name__ == "__main__": sys.exit(main())
+
+--------------------------------------------------------------------------------
+14. tests/ —— 单元测试
+--------------------------------------------------------------------------------
+一共 65 个用例，全部离线运行（不需要真实 App 凭证、不访问网络），
+通过 conftest 提供的假对象来测。
+
+  tests/conftest.py —— 共享基件
+      make_cfg(**overrides)
+          # 快速构造一份"填好假值"的 Config（默认部门、操作员 ou_operator、
+          # 审批人 ou_approver、delete 默认 approval 等），可覆盖任意字段。
+      zh_user(open_id, ...)
+          # 构造一个标准飞书 user dict（张三 13800138000，默认在职已激活），
+          # 支持 frozen/resigned/unjoin/exited 等状态开关，方便造场景。
+      class FakeClient
+          # 模拟 FeishuClient：内存 dict 存用户；
+          # 实现同构接口 batch_get_user_ids/get_user/create_user/
+          # patch_user/delete_user，并记录调用历史（created/patch_calls/
+          # delete_calls/batch_queries）供断言；可开关 fail_batch 模拟权限报错。
+          # 有了它，测试能覆盖"分支逻辑"而不碰真实网络。
+      fixture fake_client
+          # 每个测试自动拿到一个全新 FakeClient。
+
+  各测试文件：
+      test_config.py   配置加载/校验/模式判断/布尔与列表解析。
+      test_parser.py   指令解析：身份识别、开通字段解析、别名、客气话剥离、
+                       手机号合并/清洗、各种报错分支。
+      test_lifecycle.py 生命周期业务：冲突查重各分支、停用/启用/删除幂等、
+                        Person 状态机、脱敏。
+      test_actions.py  动作执行：ActionResult 组装、各动作成功/失败文案。
+      test_approval.py 审批状态机：提交/同意/拒绝/重复处理/超时/越权。
+      test_storage.py  存储：增查改、CAS transition、过期、prune。
+      test_crypto.py   加解密往返 + 错误密钥报错。
+
+--------------------------------------------------------------------------------
+15. 数据文件与配置文件
+--------------------------------------------------------------------------------
+  requirements.txt
+      fastapi / uvicorn[standard] / requests / python-dotenv / cryptography / pytest。
+      pytest 放生产依赖清单是为了开发机直接可用，无碍。
+
+  .env.example / .env
+      .env 是唯一配置入口（本工具"零代码改动"运维的关键）。
+      关键键：FEISHU_APP_ID/SECRET、FEISHU_VERIFICATION_TOKEN、
+      FEISHU_ENCRYPT_KEY、HOST/PORT、DATA_DIR、DEFAULT_DEPARTMENT_OPEN_ID、
+      DEFAULT_EMPLOYEE_TYPE、DELETE_RESOURCE_ACCEPTOR_OPEN_ID、
+      OPERATOR_OPEN_IDS、APPROVER_OPEN_IDS、PROVISION_MODE/FREEZE_MODE/
+      UNFREEZE_MODE/DELETE_MODE、APPROVAL_TTL_MINUTES。
+      .env 已被 .gitignore 排除，防止密钥入库。
+
+  data/approvals.json
+      [{"id","kind","summary","params","requester_open_id",
+        "requester_note","status","created_at","decided_at","decided_by","reply"}, ...]
+  data/audit.jsonl
+      一行一个 JSON：{"ts","action","ok","operator","detail",可选
+      entry_id/extra...}。
+
+================================================================================
+五、贯穿全项目的核心设计机制（重点）
+================================================================================
+1) 线程安全
+   - storage.py 所有读改写都过 threading.Lock（审批单"读-改-写"一体化）。
+   - server.py 用一个全局线程池 + get_bot 单例锁。
+   - lifecycle.py 冻结/解冻 PATCH 全局互斥锁 + 1 秒间隔限速。
+2) 幂等与防重复
+   - 开通：client_token（同一令牌飞书侧只建一次）+ 开通前手机号/邮箱查重
+     （含离职成员，按在职/停用/离职分别给建议）。
+   - 审批：Storage.transition 是 CAS 原语——只有 pending 状态能转移，
+     天然挡住"并发点击/重复点击/两个审批人同时处理"。
+   - 停用/启用/删除也各自做了"已是目标状态则拒绝"的幂等短路。
+3) 限速
+   - PATCH is_frozen 等被飞书限 1 QPS，代码全局串行 + time.monotonic 间隔控制。
+4) 令牌缓存与自愈
+   - tenant_access_token 缓存到"过期前 300s"，加锁只刷新一次；
+   - 任意请求遇到 99991663（令牌失效）自动强刷并重试一次。
+5) 原子写盘
+   - approvals.json 先写 .tmp 再 os.replace，崩溃不损坏；
+   - audit.jsonl 追加写 + 单行容错（坏行跳过）。
+6) 手机号脱敏
+   - 回显/审批摘要/审计全部 mask_mobile：前3+****+后4（11位大陆号）。
+7) 安全默认
+   - 操作员白名单为空 = 任何人被拒（默认安全）；
+   - delete 默认 approval 强制审批；其余动作可配置切换；
+   - 校验只在配置了 token 时启用（不强制，降低上手门槛）。
+8) 错误可读化
+   - FeishuError.friendly() 查 CONTACT_ERR_HINTS 把错误码翻成人话+处理建议；
+   - 业务层统一包成 LifecycleError（可展示文案）；
+   - 动作层再统一包成 ActionResult，保证任何异常都能回消息而不是裸 500。
+9) 飞书协议细节
+   - 事件加密（AES-256-CBC + 自定义 key/iv 推导 + PKCS7）；
+   - URL 验证 challenge 握手；verification_token 校验；
+   - 新旧两种卡片回调 payload 兼容；
+   - 3 秒内先回 code:0，业务丢线程池异步跑。
+10) 低耦合可测
+   - lifecycle 无状态、approval 注入执行器、FakeClient 同构替换，
+     让 65 个离线用例能跑全部分支。
+
+================================================================================
+六、一条消息的完整旅程（时序）
+================================================================================
+示例：操作员发"删除 zhangsan@corp.com 离职交接"（delete 默认走审批）
+
+1. 飞书服务器 POST 事件到 /webhook（可能带 encrypt 加密、token、challenge）。
+2. server.webhook：解密 -> 校验 -> 识别出 im.message.receive_v1 ->
+   bot.dispatch(raw) 丢线程池 -> HTTP 立即回 {"code":0}。
+3. 线程 _safe_handle -> handle_message_event：
+   - 只处理文本；拿到发送者 open_id（操作员）、群聊/单聊判断。
+   - parse_command 识别 action=delete，target=zhangsan@corp.com，
+     identity=email，note="离职交接"。
+4. route_command：delete 不在免授权名单 -> 校验 operator 在
+   operator_open_ids 白名单，通过。
+5. handle_account_action：cfg.is_approval("delete") == True -> 审批模式：
+   - actions.approval_summary：resolve_person 找到张三，拼摘要
+     "目标：张三（当前状态：正常）｜工号…｜备注：离职交接"；
+   - approvals.submit 建审批单（storage.create_entry，落盘 approvals.json）；
+   - 审计："提交审批"；
+   - 回操作员"📨 已提交审批（单号 op-...）"；
+   - 遍历 approver_open_ids，每人私聊一张审批卡片（同意/拒绝按钮，
+     value 携带 op 与 entry_id）。
+6. 审批人点"✅ 同意并执行" -> 飞书回传卡片回调（新/旧 payload 都兼容）：
+   - _safe_handle 识别 card.action.trigger / legacy -> 提取 operator 与 value。
+   - handle_card_action -> approvals.decide：
+       get_entry -> 非 pending? -> can_decide 校验审批人 -> is_expired? ->
+       CAS transition(pending->approved) ->
+       调 runner(params) -> run_action("delete", params) ->
+       lifecycle.resolve_person -> deprovision（DELETE + 资源转交）-> 成功文案。
+   - decide 把执行结果 reply 写回审批单；
+   - 审计："delete-同意"；
+   - 私聊通知审批人和申请人（张三的 open_id 不是点按钮的人时也会被通知）。
+7. 全程每一次落库都带锁 + 原子写；每次 API 失败都转成人话消息；
+   审计日志完整记录谁在何时对谁做了什么、结果如何。
+
+================================================================================
+七、模块依赖关系图
+================================================================================
+  run.py ──> config（校验）──> uvicorn 启动 app.server:app
+
+  app/server.py（编排中心）
+     ├─> parser.py        （指令 -> ParsedCommand）
+     ├─> actions.py       （ParsedCommand/params -> 执行 + 摘要）
+     │     └─> lifecycle.py  （业务规则）
+     │           └─> feishu_client.py（真实 API）
+     │                 └─> requests
+     ├─> approval.py      （审批状态机）
+     │     └─> storage.py （落盘，线程安全 + CAS + 原子写）
+     ├─> messages.py      （卡片/文本构造，纯函数）
+     ├─> crypto_utils.py  （回调解密）
+     └─> config.py        （全局配置，frozen dataclass 单例）
+
+  app/cli.py ──> config + feishu_client（只读运维）
+  tests/*     ──> 各业务模块（用 conftest 的 FakeClient 替代真实 client）
+
+依赖方向基本单向：server 在最上，config/storage/messages/crypto 在最下被引用，
+没有循环 import（个别延迟 import 是为了避免模块初始化期的环）。
+
+================================================================================
+（完）
+================================================================================

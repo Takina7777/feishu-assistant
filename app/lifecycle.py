@@ -214,17 +214,38 @@ def provision(client: FeishuClient, params: dict[str, Any], cfg: Config,
                 "该手机号/邮箱已绑定企业内其他成员（可能已离职），无法直接创建新账号。\n"
                 "处理方式：请在 管理后台 > 成员与部门 > 离职成员/回收站 中处理原账号后重试，或核对联系方式是否正确。"
             )
+        has_status = any(v is not None for v in (
+            person.is_resigned, person.is_frozen,
+            person.is_activated, person.is_exited, person.is_unjoin,
+        ))
         if person.is_resigned:
             raise LifecycleError(
-                f"手机号/邮箱已被离职成员 {person.name or ''} 占用，无法创建新账号。\n"
-                "请在 管理后台 > 成员与部门 > 离职成员 中将其账号恢复或注销（释放手机号）后重试。"
+                f"手机号/邮箱已被离职成员 {person.name or ''} 占用，无法直接创建新账号。\n"
+                "处理方式（二选一）：\n"
+                "· 若此人要回归：请在 管理后台 → 成员与部门 → 离职成员 中点击“恢复”，原账号即可正常使用，无需重新开通；\n"
+                "· 若要为其建立全新账号：需先彻底清理/注销离职记录以释放手机号，再执行“开通”。"
+            )
+        if person.is_unjoin:
+            raise LifecycleError(
+                f"{person.name or ''} 已存在但尚未接受加入邀请（待加入状态）。\n"
+                "请等待其接受邀请后再使用，或先发送“删除”取消该邀请后重新开通。"
             )
         if person.is_frozen:
             raise LifecycleError(
                 f"{person.name} 已存在但处于停用状态（手机号/邮箱一致）。如需复用请先发送：启用 {mobile or email}"
             )
+        if has_status:
+            raise LifecycleError(
+                f"{person.name} 已是在职成员（手机号/邮箱一致），无需重复开通。可用“查询 {mobile or email}”查看详情。"
+            )
+        # 状态字段缺失（未开通“获取用户受雇信息”字段权限）时无法区分在职/离职
         raise LifecycleError(
-            f"{person.name} 已是在职成员（手机号/邮箱一致），无需重复开通。可用“查询 {mobile or email}”查看详情。"
+            f"手机号/邮箱已关联成员 {person.name or ''}，但暂时无法读取其账号状态"
+            "（应用缺少“获取用户受雇信息(contact:user.employee:readonly)”字段权限）。\n"
+            "请先在 管理后台 → 成员与部门 核实该成员状态：\n"
+            "· 已离职且要其回归 → 在“离职成员”中点击“恢复”，原账号即可使用，无需重新开通；\n"
+            "· 要新建账号 → 需先释放其手机号/邮箱（注销或彻底清理离职记录）后再执行“开通”。\n"
+            "建议为应用开通上述字段权限，机器人即可自动判断状态。"
         )
 
     dept = params.get("dept_open_id") or cfg.default_department_open_id
