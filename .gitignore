@@ -15,3 +15,6 @@ data/
 # IDE
 .idea/
 .vscode/
+
+# 用户本地解读文档，不入仓
+代码解读.txt
