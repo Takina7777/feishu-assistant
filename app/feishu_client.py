@@ -41,6 +41,15 @@ CONTACT_ERR_HINTS: dict[int, str] = {
     44050: "应用未开通“分配用户席位”权限",
     44051: "工号重复，请修改",
     44062: "根据租户配置，该成员只能通过生命周期引擎处理，无法用 API 删除",
+    # 恢复离职成员（directory v1）
+    2221123: "该员工曾拒绝加入租户，无法恢复，请联系员工确认是否同意加入",
+    2221268: "租户不在恢复白名单中，无法恢复员工（请检查租户访问列表/请联系飞书）",
+    2221269: "待恢复员工的信息与在职成员冲突（ID/手机号/邮箱被占用），请先处理冲突成员",
+    2221270: "员工仍在离职流程中，暂时无法恢复，请稍后重试",
+    2221275: "当前企业版本不支持恢复离职成员（需商业专业版及以上），请联系管理员确认版本",
+    2224001: "无操作权限：请为应用开通“恢复离职员工(directory:employee.resurrect:write)”权限并发布，且版本需商业专业版及以上",
+    2224002: "无该成员记录的恢复权限，请检查应用的通讯录数据权限范围",
+    2224003: "无目标部门操作权限，请检查应用对该部门的通讯录权限范围",
     99991672: "应用无权限调用该接口，请检查权限管理中的 API 权限并发布版本",
     99991661: "访问令牌无效或已过期",
 }
@@ -207,6 +216,19 @@ class FeishuClient:
         self._request(
             "DELETE", f"/contact/v3/users/{open_id}",
             query={"user_id_type": "open_id"}, body=body,
+        )
+
+    def resurrect_user(self, employee_open_id: str) -> None:
+        """恢复离职成员至在职（directory v1）。
+
+        前置条件：企业版本商业专业版及以上、离职 30 天内、手机号/邮箱/ID 未被占用；
+        需要权限：恢复离职员工(directory:employee.resurrect:write)。
+        限频 10 次/分钟。恢复成功后返回 data={}。
+        """
+        self._request(
+            "POST", f"/directory/v1/employees/{employee_open_id}/resurrect",
+            query={"employee_id_type": "open_id", "department_id_type": "open_department_id"},
+            body={},
         )
 
     # ------------------------------------------------------------------ #

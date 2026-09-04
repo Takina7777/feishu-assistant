@@ -125,6 +125,15 @@ class FakeClient:
         user["status"]["is_resigned"] = True
         user["status"]["is_activated"] = False
 
+    def resurrect_user(self, employee_open_id: str):
+        user = self.users.get(employee_open_id)
+        if user is None:
+            raise FeishuError(99991661, "user not found")
+        self.resurrect_calls = getattr(self, "resurrect_calls", [])
+        self.resurrect_calls.append(employee_open_id)
+        user["status"]["is_resigned"] = False
+        user["status"]["is_activated"] = True
+
 
 @pytest.fixture
 def fake_client() -> FakeClient:

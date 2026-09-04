@@ -61,17 +61,19 @@ class Config:
     freeze_mode: str = "direct"
     unfreeze_mode: str = "direct"
     delete_mode: str = "approval"
+    restore_mode: str = "direct"     # 恢复离职成员
     approval_ttl_minutes: int = 1440
     # 令牌可访问性开关
     api_base: str = "https://open.feishu.cn/open-apis"
 
     def is_approval(self, action: str) -> bool:
-        """某类操作是否走审批（action: provision/freeze/unfreeze/delete）。"""
+        """某类操作是否走审批（action: provision/freeze/unfreeze/delete/restore）。"""
         mode = {
             "provision": self.provision_mode,
             "freeze": self.freeze_mode,
             "unfreeze": self.unfreeze_mode,
             "delete": self.delete_mode,
+            "restore": self.restore_mode,
         }.get(action, "direct")
         return mode.lower() == "approval"
 
@@ -114,6 +116,7 @@ def load_config() -> Config:
         freeze_mode=_env("FREEZE_MODE", "direct") or "direct",
         unfreeze_mode=_env("UNFREEZE_MODE", "direct") or "direct",
         delete_mode=_env("DELETE_MODE", "approval") or "approval",
+        restore_mode=_env("RESTORE_MODE", "direct") or "direct",
         approval_ttl_minutes=int(_env("APPROVAL_TTL_MINUTES", "1440") or 1440),
     )
     _config = cfg

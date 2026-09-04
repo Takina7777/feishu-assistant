@@ -30,6 +30,8 @@
    - 创建成员：POST /contact/v3/users（需 name/mobile/department_ids，发加入邀请）
    - 停用/启用：PATCH /contact/v3/users/:id 的 is_frozen 字段（限 1 QPS）
    - 删除（离职）：DELETE /contact/v3/users/:id（资源可转交）
+   - 恢复离职成员：POST /directory/v1/employees/:employee_id/resurrect（directory v1，
+     需商业专业版+、离职 30 天内；权限 directory:employee.resurrect:write）
    - 身份解析：POST /contact/v3/users/batch_get_id（手机号/邮箱→open_id）
    - 消息收发：POST /im/v1/messages；事件 im.message.receive_v1
 3. 代码分层（app/）：
@@ -138,6 +140,21 @@
    - 待办：若需机器人直连“恢复离职员工”，核实并接入飞书目录类恢复接口
      （directory-v1/employee/resurrect 类，视租户支持情况）。
 
+11.【功能】新增“恢复（离职回归）”指令，接通“恢复离职员工”API。
+   - 接口核实：POST /open-apis/directory/v1/employees/:employee_id/resurrect
+     （employee_id_type=open_id；限频 10 次/分钟）。
+   - 前置条件（来自官方文档）：企业版本需商业专业版及以上；员工需在离职 30 天内；
+     其 ID/手机号/邮箱不能被其他成员占用；应用需开通
+     “恢复离职员工(directory:employee.resurrect:write)”或
+     “创建、更新、离职、恢复员工(directory:employee:write)”权限。
+   - 指令：恢复 <手机号|邮箱|open_id>（别名：恢复账号/离职恢复/恢复离职/resurrect）。
+   - 交互逻辑：非离职状态（能读到状态时）→ 提示无需恢复；离职或状态不可读 → 调用恢复接口，
+     成功回显“已恢复为在职”，失败按错误码 2221xxx 给出中文原因（版本/权限/占用/流程中/席位等）。
+   - 配置：新增 RESTORE_MODE（默认 direct）。
+   - 权限使用说明：contact:user.employee:readonly（获取用户受雇信息）用于确认成员是否离职，
+     是“恢复/停用/开通查重”等状态判断的基础，已在 README 与帮助文本中说明。
+   - 测试：新增解析器(恢复别名)、动作层(离职可恢复/在职拦截/启用离职指向恢复)与配置(默认direct)用例。
+
 --------------------------------------------------
 五、当前进展状态（checklist）
 --------------------------------------------------
@@ -146,6 +163,9 @@
 [√] 服务健康检查 / 事件订阅 URL 验证 / 消息收发链路
 [√] 指令：帮助 / 我的ID / 查询 / 开通 / 停用 / 启用（已在真实环境调用）
 [√] “待加入”成员的友好提示与删除建议
+[√] “恢复（离职回归）”指令：基于 directory v1 resurrect，含离职/在职状态判断与错误码提示
+[ ] 恢复指令真实环境验证：需企业商业专业版+、开通 directory:employee.resurrect:write
+    （建议同时开通 contact:user.employee:readonly 以准确识别离职状态）
 [ ] 删除+审批链路：后台已补卡片回调地址，待用户点“同意”验证执行
 [ ] 部门名称字段权限：待用户在后台开通后，重跑 departments 填入默认部门
 [ ] 多许可证(席位)场景：如开通报 44046/44050 再接入
@@ -186,6 +206,8 @@
   b4c5f51 fix: unjoin member freeze guidance and friendly 44010/44011 hints
   131a1bf 基础功能完善（新增本开发日志）
   后续      fix: 离职后再开通/启用的提示与状态误判修正（42006 提示、provision 冲突分支精确化，见问题10）
+  后续      feat: 新增“恢复（离职回归）”指令（directory v1 resurrect）+ contact:user.employee:readonly
+                  状态识别说明（见问题11）
 
-测试：python -m pytest -q  （73 passed，离线）
+测试：python -m pytest -q  （85 passed，离线）
 运行：python run.py        （详见 README）

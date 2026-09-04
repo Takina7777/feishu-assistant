@@ -3,7 +3,8 @@
 支持（别名已做归一化，大小写不敏感）：
   开通 / 创建 / 新增 / onboard         —— 开通账号（创建飞书成员）
   停用 / 冻结 / 回收                   —— 停用账号（is_frozen=true，可恢复）
-  启用 / 解冻 / 恢复账号                —— 恢复被停用账号
+  启用 / 解冻                          —— 启用被停用账号
+  恢复 / 恢复账号 / 离职恢复            —— 将已离职成员恢复为在职（directory v1）
   删除 / 彻底删除 / 回收-彻底删除 / 注销 —— 彻底删除账号（离职，默认走审批）
   查询 / 查 / status                   —— 查询账号状态
   我的ID / whoami                       —— 获取本人 open_id（用于配置白名单）
@@ -21,7 +22,8 @@ from dataclasses import dataclass, field
 ACTION_ALIASES: dict[str, list[str]] = {
     "provision": ["开通", "创建", "新增", "添加", "onboard", "开账号", "开通账号"],
     "freeze": ["停用", "冻结", "回收", "回收账号", "suspend", "停用账号"],
-    "unfreeze": ["启用", "解冻", "恢复账号", "unfreeze", "activate", "启账号", "启用账号"],
+    "unfreeze": ["启用", "解冻", "激活", "unfreeze", "activate", "启账号", "启用账号"],
+    "restore": ["恢复", "恢复账号", "恢复离职", "离职恢复", "恢复成员", "resurrect"],
     "delete": ["删除", "彻底删除", "注销", "回收-彻底删除", "delete", "离职", "删除账号", "回收-删除"],
     "query": ["查询", "查", "查找", "status", "状态", "看看"],
     "whoami": ["我的id", "我的ID", "whoami", "我是谁"],
@@ -203,12 +205,13 @@ def parse_command(raw_text: str) -> ParsedCommand:
     if action == "provision":
         return _parse_provision(cmd, tokens, rest)
 
-    # 冻结 / 启用 / 删除 / 查询 —— 都需要一个身份目标
+    # 冻结 / 启用 / 恢复 / 删除 / 查询 —— 都需要一个身份目标
     target_raw = rest.strip().strip(":： ")
     if not target_raw:
         usage = {
             "freeze": "停用 手机号/邮箱/open_id（例：停用 13800138000）",
             "unfreeze": "启用 手机号/邮箱/open_id（例：启用 13800138000）",
+            "restore": "恢复 手机号/邮箱/open_id（例：恢复 13800138000；恢复已离职成员）",
             "delete": "删除 手机号/邮箱/open_id（例：删除 13800138000；默认需审批）",
             "query": "查询 手机号/邮箱/open_id（例：查询 zhangsan@corp.com）",
         }[action]

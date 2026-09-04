@@ -89,11 +89,17 @@ class TestIdentityOps:
         assert cmd.target == "13800138000"
         assert cmd.identity == "mobile"
 
-    @pytest.mark.parametrize("verb", ["启用", "解冻", "恢复账号"])
+    @pytest.mark.parametrize("verb", ["启用", "解冻", "激活", "启用账号"])
     def test_unfreeze_aliases(self, verb):
         cmd = parse_command(f"{verb} zhangsan@corp.com")
         assert cmd.action == "unfreeze"
         assert cmd.identity == "email"
+
+    @pytest.mark.parametrize("verb", ["恢复", "恢复账号", "离职恢复", "恢复离职", "resurrect"])
+    def test_restore_aliases(self, verb):
+        cmd = parse_command(f"{verb} 13800138000")
+        assert cmd.action == "restore"
+        assert cmd.identity == "mobile"
 
     @pytest.mark.parametrize("verb", ["删除", "彻底删除", "注销", "离职", "回收-彻底删除"])
     def test_delete_aliases(self, verb):

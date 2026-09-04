@@ -17,6 +17,7 @@ def test_is_approval_maps_modes():
     assert cfg2.is_approval("provision") is True
     assert cfg2.is_approval("freeze") is False
     assert cfg2.is_approval("delete") is True
+    assert cfg2.is_approval("restore") is False  # 默认 direct
 
     # 未知类型按 direct 处理
     assert cfg2.is_approval("whatever") is False

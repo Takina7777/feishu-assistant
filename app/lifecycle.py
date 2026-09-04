@@ -311,5 +311,17 @@ def deprovision(client: FeishuClient, open_id: str, cfg: Config) -> None:
         raise LifecycleError(f"删除失败。{e.friendly()}")
 
 
+def restore(client: FeishuClient, open_id: str) -> Person:
+    """恢复离职成员为在职（directory v1，需相应权限与企业版本）。"""
+    try:
+        client.resurrect_user(open_id)
+    except FeishuError as e:
+        raise LifecycleError(f"恢复失败。{e.friendly()}")
+    try:
+        return Person.from_user(client.get_user(open_id))
+    except FeishuError:
+        return resolve_person(client, open_id, "open_id")
+
+
 def provision_summary(params: dict[str, Any], cfg: Config) -> str:
     return _describe_provision_params(params, cfg)

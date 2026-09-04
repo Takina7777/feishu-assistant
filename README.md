@@ -15,13 +15,14 @@
 | 开通账号（入职） | `开通 张三 13800138000 zhangsan@corp.com 部门=od-xxx 工号=1001` | 创建飞书成员，系统向手机/邮箱发加入邀请，对方同意后即可使用 | direct（可改 approval） |
 | 停用（回收，可恢复） | `停用 13800138000`（别名：冻结/回收） | `PATCH is_frozen=true`，成员无法登录，账号保留 | direct（可改 approval） |
 | 启用（解除停用） | `启用 13800138000`（别名：解冻） | `PATCH is_frozen=false` | direct（可改 approval） |
+| 恢复离职成员 | `恢复 13800138000`（别名：恢复账号/离职恢复） | `POST /directory/v1/employees/:id/resurrect`，将已离职成员恢复为在职 | direct（可改 approval） |
 | 彻底删除（离职） | `删除 13800138000 离职交接` | `DELETE` 删除成员，名下文档/日程/群主/应用等转交 | **approval（默认强制审批，可改）** |
 | 查询账号状态 | `查询 13800138000` | 通过手机号/邮箱定位成员并回显状态 | 直接 |
 | 其他 | `帮助` / `我的ID` / `日志 20` | 帮助、本人 open_id、最近操作审计 | 直接 |
 
 补充说明（重要，见 FAQ）：
-- **停用 ≠ 彻底删除**：停用（冻结）随时可“启用”恢复；彻底删除对应飞书“离职”，可在管理后台
-  “离职成员/回收站”恢复。
+- **停用 ≠ 彻底删除**：停用（冻结）随时可“启用”恢复；彻底删除对应飞书“离职”，**离职后回归请用“恢复”**。
+- **“恢复”限制**：需企业**商业专业版及以上**、且成员**离职 30 天内**；恢复时其 ID/手机号/邮箱不能被他人占用。
 - **身份识别**：目标账号用**手机号 / 邮箱 / open_id** 三者之一即可。机器人**暂不支持按姓名搜索**
   （飞书开放平台“搜索用户”接口未对租户凭证开放，见 FAQ）。
 - 指令支持自然语气（`请帮我…`、群聊 `@机器人` 后跟指令），解析器已做归一化。
@@ -69,7 +70,8 @@ tests/             单元测试（65 个，pytest，不需要真实凭证/网络
 | --- | --- |
 | 创建 / 停用 / 删除成员 | `更新通讯录`（`contact:contact`），或按文档至少 `contact:user.base`（PATCH） |
 | 手机号/邮箱定位成员 | `通过手机号或邮箱获取用户 ID`（`contact:user.id:readonly`） |
-| 读取成员详情与状态 | `获取用户基本信息`（`contact:user.base:readonly`）、`获取用户受雇信息`（`contact:user.employee:readonly`）、`获取用户邮箱信息`（`contact:user.email:readonly`）、`获取用户手机号`（`contact:user.phone:readonly`）、`查看成员工号`（`contact:user.employee_number:read`）等只读字段权限 |
+| 读取成员详情与状态 | `获取用户基本信息`（`contact:user.base:readonly`）、**`获取用户受雇信息`（`contact:user.employee:readonly`，用于准确判断成员是否离职/停用/待加入，是“恢复”与防误判的前提）**、`获取用户邮箱信息`（`contact:user.email:readonly`）、`获取用户手机号`（`contact:user.phone:readonly`）、`查看成员工号`（`contact:user.employee_number:read`）等只读字段权限 |
+| 恢复离职成员 | `恢复离职员工`（`directory:employee.resurrect:write`）或 `创建、更新、离职、恢复员工`（`directory:employee:write`） |
 | 发送消息 | `获取与发送单聊、群组消息`（`im:message`） |
 | 接收消息事件 | 事件 `接收消息 im.message.receive_v1`：单聊 `im:message.p2p_msg:readonly`；群聊还需 `im:message.group_msg`（开通事件时按控制台提示添加） |
 
@@ -104,7 +106,7 @@ python run.py
 | `DEFAULT_DEPARTMENT_OPEN_ID` | 开通时的默认部门 `od-xxx`（管理后台→成员与部门→部门详情可查），命令中可用 `部门=od-xxx` 覆盖 |
 | `OPERATOR_OPEN_IDS` | 有操作权限的人（逗号分隔）。先给机器人发 **“我的ID”**，把返回的 `ou_xxx` 填进来。留空=全部拒绝（默认安全） |
 | `APPROVER_OPEN_IDS` | 审批人（仅 approval 模式生效） |
-| `PROVISION_MODE` / `FREEZE_MODE` / `UNFREEZE_MODE` / `DELETE_MODE` | `direct`=直接执行；`approval`=先发审批卡片。删除默认 approval |
+| `PROVISION_MODE` / `FREEZE_MODE` / `UNFREEZE_MODE` / `RESTORE_MODE` / `DELETE_MODE` | `direct`=直接执行；`approval`=先发审批卡片。删除默认 approval |
 | `APPROVAL_TTL_MINUTES` | 审批单有效期，默认 1440 分钟 |
 | `DELETE_RESOURCE_ACCEPTOR_OPEN_ID` | 彻底删除时资源转交人（默认转给直属上级） |
 | `FEISHU_VERIFICATION_TOKEN` / `FEISHU_ENCRYPT_KEY` | 与开发者后台一致才填 |
@@ -165,6 +167,7 @@ python -m app.cli departments
 开通 张三 13800138000 [zhangsan@corp.com] [部门=od-xxx] [工号=1001] [职务=工程师] [英文名=San] [类型=正式|实习|外包|劳务|顾问]
 停用 13800138000              → 冻结，账号保留、无法登录（可恢复）
 启用 13800138000              → 解冻
+恢复 13800138000              → 将已离职成员恢复为在职（需商业专业版+、离职 30 天内）
 删除 13800138000 [备注]        → 彻底删除（离职），默认需审批；资源转交（默认直属上级）
 查询 13800138000 / zhangsan@corp.com / ou_xxx
 日志 [条数]                    → 最近操作审计（默认 10 条，最多 50）
@@ -217,6 +220,14 @@ python -m pytest -q
 **Q2：停用和彻底删除有什么区别？**
 停用=`PATCH is_frozen=true`，账号还在通讯录里（不能登录）；彻底删除=`DELETE`，相当于管理后台的“离职”，
 用户从通讯录移除、资源转交。二者都可在管理后台（离职成员/回收站）恢复。停用期间仍占用席位，删除会释放席位。
+
+**Q2.1：成员离职后又想让他回归 / 为什么同手机号不能“重新开通”？**
+- 离职成员**回归** = 使用 `恢复 手机号/邮箱/open_id`（走“恢复离职员工”接口），把该成员恢复为在职，而不是“开通”新号；
+- 离职后其手机号/邮箱在租户内仍被占用，直接“开通”会失败或误提示“已存在”，必须先恢复或彻底释放联系方式；
+- “恢复”需要：企业**商业专业版及以上**、**离职 30 天内**、其 ID/手机号/邮箱未被他人占用，且应用已开通
+  `恢复离职员工(directory:employee.resurrect:write)` 权限；
+- 建议同时开通 `获取用户受雇信息(contact:user.employee:readonly)`：它让机器人能读到 is_resigned 等状态，
+  从而准确区分在职/停用/离职/待加入，避免误报与误操作。
 
 **Q3：为什么不能按“姓名”查人/停用？**
 飞书通讯录 v3 未向应用提供“按姓名搜索用户”的租户凭证接口（旧版接口已下线），故统一以

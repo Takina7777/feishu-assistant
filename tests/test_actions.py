@@ -60,6 +60,29 @@ def test_delete_ok(fake_client):
     assert fake_client.delete_calls == ["ou_t"]
 
 
+def test_restore_resigned_ok(fake_client):
+    fake_client.add(zh_user("ou_gone", mobile="13800138000", resigned=True, name="泷奈"))
+    r = actions.run_action("restore", {"ident": "13800138000", "identity": "mobile"}, make_cfg(), fake_client)
+    assert r.ok is True
+    assert "已恢复为在职" in r.text
+    assert fake_client.resurrect_calls == ["ou_gone"]
+
+
+def test_restore_active_user_blocked(fake_client):
+    fake_client.add(zh_user("ou_active", mobile="13800138000", name="泷奈"))
+    r = actions.run_action("restore", {"ident": "13800138000", "identity": "mobile"}, make_cfg(), fake_client)
+    assert r.ok is False
+    assert "并非离职状态" in r.text
+    assert not hasattr(fake_client, "resurrect_calls")
+
+
+def test_unfreeze_resigned_points_to_restore(fake_client):
+    fake_client.add(zh_user("ou_gone", mobile="13800138000", resigned=True))
+    r = actions.run_action("unfreeze", {"ident": "13800138000", "identity": "mobile"}, make_cfg(), fake_client)
+    assert r.ok is False
+    assert "恢复" in r.text
+
+
 def test_action_error_not_found(fake_client):
     r = actions.run_action("query", {"ident": "13700000000", "identity": "mobile"}, make_cfg(), fake_client)
     assert r.ok is False

@@ -26,10 +26,10 @@ def _err(e: Exception, kind: str) -> ActionResult:
 
 
 def run_action(kind: str, params: dict[str, Any], cfg: Config, client: FeishuClient) -> ActionResult:
-    """统一入口：kind ∈ provision/freeze/unfreeze/delete/query。参数见各分支。"""
+    """统一入口：kind ∈ provision/freeze/unfreeze/restore/delete/query。参数见各分支。"""
     if kind == "provision":
         return _do_provision(params, cfg, client)
-    if kind in ("freeze", "unfreeze", "delete", "query"):
+    if kind in ("freeze", "unfreeze", "restore", "delete", "query"):
         return _do_identity_action(kind, params, cfg, client)
     return _err(ValueError(f"未知操作类型：{kind}"), kind)
 
@@ -67,6 +67,10 @@ def _do_identity_action(kind: str, params: dict[str, Any], cfg: Config, client: 
         return _err(e, kind)
 
     open_id = person.open_id
+    has_status = any(v is not None for v in (
+        person.is_resigned, person.is_frozen,
+        person.is_activated, person.is_exited, person.is_unjoin,
+    ))
     try:
         if kind == "query":
             text = f"📋 查询结果\n{status_text(person)}"
@@ -96,11 +100,28 @@ def _do_identity_action(kind: str, params: dict[str, Any], cfg: Config, client: 
                 return ActionResult(
                     ok=False,
                     text=f"{person.name} 已离职（账号已删除），无法通过“启用”恢复。\n"
-                         "请管理员在 管理后台 > 成员与部门 > 离职成员 中恢复，或重新“开通”。",
+                         "如需让其回归：发送 恢复 <手机号/邮箱>（需企业商业专业版及以上、离职 30 天内），"
+                         "或到 管理后台 > 成员与部门 > 离职成员 中恢复。",
                     person=person, kind=kind, detail=f"{person.name}",
                 )
             person = lifecycle.unfreeze(client, open_id)
             text = f"✅ 已启用账号：{person.name}\n该成员现已恢复正常使用。"
+        elif kind == "restore":
+            if person.is_resigned is False and has_status:
+                return ActionResult(
+                    ok=False,
+                    text=f"{person.name} 当前并非离职状态（{person.state_label}），无需恢复。\n"
+                         "如需停用/启用请使用：停用 / 启用 <手机号|邮箱>。",
+                    person=person, kind=kind, detail=f"{person.name}",
+                )
+            if person.is_resigned is True and person.is_frozen:
+                text_note = "\n恢复后如仍处于停用，可发送：启用 " + ident
+            else:
+                text_note = ""
+            person = lifecycle.restore(client, open_id)
+            text = (f"✅ 已恢复为在职：{person.name}\n"
+                    f"该成员已从离职状态恢复，账号可正常使用。{text_note}\n"
+                    "注意：离职期间被清理/转移的资源可能无法找回，请提醒成员核对。")
         elif kind == "delete":
             if person.is_resigned:
                 return ActionResult(ok=False, text=f"{person.name} 已处于离职状态，无需重复删除。", person=person,
